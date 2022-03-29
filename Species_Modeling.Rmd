@@ -1,0 +1,446 @@
+---
+title: "Species modeling"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, warning = FALSE, message = FALSE)
+```
+
+
+## Objective:
+
+The objective of this Rmd is to generate the Species Distribution Models for The Species in `Nordic_CWR_List_Fitzgerald.xlsx`. For that the following packages will be loaded:
+
+```{r LoadPackages}
+library(readxl)
+# For spatial thinning
+library(spThin)
+# For data wranggling
+library(tidyverse)
+#for paralellization
+library(foreach)
+library(doSNOW)
+library(tcltk)
+
+# for the variables
+library(raster)
+library(terra)
+#For shapeifules and vectors
+library(sf)
+library(taxize)
+## For data retrival and cleaning
+
+
+# For species modeling
+library(maxnet)
+library(dismo)
+library(ENMeval)
+library(rangeModelMetadata)
+dir.create("TemporalRaster")
+rasterOptions(tmpdir = paste0(getwd(), "/TemporalRaster"))
+dir.create("TemporalTerra")
+terraOptions(tmpdir = paste0(getwd(), "/TemporalTerra"))
+```
+
+
+## data cleaning
+
+### Taxonomic cleaning
+
+First we will submit all synonyms to `Taxize` to get the closest species in the `GBIF` backbone dataset, we will discard any species that don`t have a match level equal or greater than 0.8
+
+```{r taxonomicClean, cache=T}
+Names <- read_excel("Nordic_CWR_list_Fitzgerald.xlsx") %>%
+    purrr::map(as.vector) %>% 
+    purrr::reduce(c) 
+
+Names <- Names[stringr::str_detect(Names, "NO", negate = T)]
+
+Names <- Names %>% 
+  unique() %>% 
+  sort()  
+    
+    
+    
+Cleanded <- taxize::gnr_resolve(Names, data_source_ids = "11", canonical = TRUE, best_match_only = T) %>%
+  dplyr::filter(score > 0.9) %>%
+  dplyr::pull(matched_name2) %>% 
+  unique() %>%
+  rgbif::name_backbone_checklist()
+
+Taxon_Keys <- Cleanded %>%
+    dplyr::pull(usageKey) %>%
+    unique()
+```
+
+
+Then we will retrieve presences from GBIF:
+
+```{r retrieveOccs, cache=T}
+
+Occs <- list()
+
+for(i in 1:length(Taxon_Keys)){
+  Occs[[i]] <- rgbif::occ_data(taxonKey = Taxon_Keys,
+                  hasCoordinate = T,
+                  continent = "europe",
+                  hasGeospatialIssue=FALSE,
+                  limit = 100000)
+  message(paste(i, "of", length(Taxon_Keys), "ready!", Sys.time()))
+  saveRDS(Occs, "Occs.rds")
+}
+```
+
+
+From that we get the following number of occurrences per species
+
+```{r}
+Occs <- readRDS("Occs.rds")
+```
+
+
+
+## Spatial thinning
+
+In order to generate models that are not spatially auto correlated, a Spatial thinning will be made using the `spThin` package:
+
+So we read in the ocurrences
+
+```{r readocurrences}
+#Occurrences <- readRDS("Species_Ocurr.rds")
+```
+
+And use spatial thinning
+
+```{r thin, cache=T, message=F, eval=FALSE}
+
+### Change eval FALSE to TRUE if you need to run this again
+#dir.create("Final_Ocurrences")
+
+#Thinning process
+#Occurrences_by_sp <- Occurrences %>% group_split(scrubbed_species_binomial)
+
+#rm(Occurrences)
+#gc()
+
+#Nclust <- parallel::detectCores()/4
+#cl <- makeSOCKcluster(Nclust)
+#registerDoSNOW(cl)
+
+#ntasks <- length(Occurrences_by_sp)
+#pb <- tkProgressBar(max=ntasks)
+#progress <- function(n) setTkProgressBar(pb, n)
+#opts <- list(progress=progress)
+
+
+# foreach(i = 1:length(Occurrences_by_sp), .packages = c("spThin","dplyr", "stringr"), .options.snow=opts) %dopar% {
+#   set.seed(i)
+#   Temp <- spThin::thin(Occurrences_by_sp[[i]], lat.col = "latitude", long.col = "longitude", spec.col ="scrubbed_species_binomial", write.log.file = F, verbose = F, thin.par = 5, reps = 1, write.files = F, locs.thinned.list.return = T)
+#   
+#   Temp <- Temp[[1]] %>% 
+#     mutate(Species = unique(Occurrences_by_sp[[i]]$scrubbed_species_binomial))
+#   
+#   if(nrow(Temp) >= 8){
+#     saveRDS(Temp, paste0("Final_Ocurrences/", str_replace_all(unique(Occurrences_by_sp[[i]]$scrubbed_species_binomial), " ","_"), ".rds"))
+#   }
+#   
+#   sink("log.txt", append = T)
+#  cat(paste(i, "of", length(Occurrences_by_sp), "ready!", Sys.time()))
+#  cat("\n")
+#  sink()
+# 
+#   gc()
+# }
+# stopCluster(cl)
+```
+
+```{r clean, echo=F, message=F, warning=F}
+# rm(Occurrences_by_sp)
+# gc()
+```
+## Now the modeling
+
+First read the environmental variables:
+
+
+```{r}
+# set.seed(2021)
+# 
+# Bio <- terra::rast("Current.tif") %>% 
+#   terra::project(y = "+proj=aea +lon_0=17.7539063 +lat_1=37.0553505 +lat_2=61.0650168 +lat_0=49.0601837 +datum=WGS84 +units=m +no_defs")
+# 
+# Bio <- Bio %>% raster::stack()
+# 
+# writeRaster(Bio, "CurrentEA.tif", overwrite=TRUE)
+```
+
+Now model for every species:
+
+```{r}
+## Make a list of all species presences
+# 
+# dir.create("Models")
+# dir.create("Logs")
+# dir.create("Projection_Present")
+# dir.create("Projection_PresentBIN")
+# dir.create("Projection_Future")
+# dir.create("Projection_FutureBIN")
+# 
+# 
+# Bio <- terra::rast("CurrentEA.tif")
+# 
+# names(Bio) <- paste0("Bio", 1:19)
+# 
+# Presences_by_sp <- list.files(path = "Final_Ocurrences/", pattern = ".rds", full.names = T)
+# 
+# Nclust <- floor(parallel::detectCores()/4)
+# cl <- makeSOCKcluster(Nclust)
+# registerDoSNOW(cl)
+# 
+# ntasks <- length(Presences_by_sp)
+# pb <- tkProgressBar(max=ntasks)
+# progress <- function(n) setTkProgressBar(pb, n)
+# opts <- list(progress=progress)
+# 
+# 
+# foreach(i = 1:length(Presences_by_sp), .packages = c("sf","dplyr", "stringr", "raster", "maxnet", "terra", "dismo", "magrittr"), .options.snow=opts) %dopar% {
+# #for(i in 624:length(Presences_by_sp)){
+#   Log <- data.frame(Species = NA, AUC = NA, Threshold = NA, Regularization = NA,
+#                   n_presences = NA, current_area = NA, final_area  = NA, Start_Time = NA, Finish_Time = NA)
+#   dir.create(paste("TemporalRaster", i, sep = "_"))
+#   rasterOptions(tmpdir = paste0(getwd(), paste("/TemporalRaster", i, sep = "_")))
+#   dir.create(paste("TemporalTerra", i, sep = "_"))
+#   terraOptions(tmpdir = paste0(getwd(), paste("/TemporalTerra", i, sep = "_")))
+# 
+#   Bio <- terra::rast("CurrentEA.tif")
+#   names(Bio) <- paste0("Bio", 1:19)
+# 
+#   Log$Start_Time <- Sys.time()
+#   SppOccur <- readRDS(Presences_by_sp[i])
+# 
+# SppOccur_SF <- SppOccur %>%
+#   st_as_sf(coords = c("Longitude", "Latitude"), crs = "+proj=longlat +datum=WGS84 +no_defs") %>% 
+#   st_transform("+proj=aea +lon_0=17.7539063 +lat_1=37.0553505 +lat_2=61.0650168 +lat_0=49.0601837 +datum=WGS84 +units=m +no_defs")
+# 
+# occs <- SppOccur_SF %>% 
+#   st_coordinates() %>% 
+#   as.data.frame()
+# 
+# Log$n_presences <- nrow(occs)
+# Log$Species <- SppOccur$Species[1]
+# 
+# colnames(occs) <- c("Longitude", "Latitude")
+# 
+# 
+# SppConvex <- SppOccur_SF %>% 
+#   st_union() %>% 
+#   st_convex_hull()
+# 
+# ncg <- st_geometry(SppConvex)
+# cntrd <- st_centroid(ncg)
+# ncg2 <- (ncg - cntrd)* 1.2 + cntrd
+# ncg2 <- ncg2 %>% st_as_sf(crs = "+proj=aea +lon_0=17.7539063 +lat_1=37.0553505 +lat_2=61.0650168 +lat_0=49.0601837 +datum=WGS84 +units=m +no_defs")
+# 
+# 
+# Mask <- terra::vect(SppConvex) %>% terra::rasterize(Bio[[1]])
+# Mask <- terra::mask(Bio[[1]], Mask)
+# 
+# occs.z <- cbind(occs, terra::extract(Bio, occs))
+# 
+# set.seed(2021)
+# bg <- dismo::randomPoints(raster::raster(Mask), n = 10000) %>% as.data.frame()
+# colnames(bg) <- c("Longitude", "Latitude")
+# bg.z <- cbind(bg, terra::extract(Bio, bg))
+# 
+# 
+# occs.z <- occs.z %>% mutate(Pres = 1)
+# bg.z <- bg.z %>% mutate(Pres = 0)  %>% 
+#   dplyr::filter_all(~ !is.na(.x))
+# 
+# Conditions <- bind_rows(occs.z, bg.z) %>% dplyr::select(-Longitude, -Latitude, -ID) %>% 
+#   dplyr::filter_all(~ !is.na(.x))
+# 
+# Regs <- c(1,2)
+# 
+# Mods <- list()
+# Evals <- list() 
+# 
+# AUCs <- numeric()
+# 
+# for(j in 1:length(Regs)){
+#   Mods[[j]] <- maxnet(p = Conditions$Pres, data = dplyr::select(Conditions, starts_with("Bio")), 
+#         regmult = Regs[j], maxnet.formula(p = Conditions$Pres, data = dplyr::select(Conditions, starts_with("Bio")), classes = "lq"), clamp= F)
+# 
+# 
+# #Transformar en presencia y ausencia (ya que eso es lo que tratamos de predecir)
+# 
+#   Evals[[j]] <- dismo::evaluate(p = dplyr::select(occs.z, starts_with("Bio")), a = dplyr::select(bg.z, starts_with("Bio")), model = Mods[[j]],  type = "cloglog")
+#   AUCs[j] <- Evals[[j]]@auc
+# 
+# }
+# 
+# Log$AUC <- max(AUCs)
+# 
+# Select <- c(1,2)[AUCs  == max(AUCs)]
+# 
+# if(length(Select) == length(AUCs)){
+#   Select <- sample(1:length(AUCs), size = 1)
+# }
+# BestEval <- Evals[Select][[1]]
+# Log$Threshold <- threshold(BestEval, stat = "spec_sens")
+# Log$Regularization <- Regs[Select]
+# Model <- Mods[Select][[1]]
+# 
+# rm(Mods)
+# rm(Mask)
+# gc()
+# 
+# Bio <- raster::stack("CurrentEA.tif")
+# 
+# names(Bio) <- paste0("Bio", 1:19)
+# PresentDist <- raster::predict(object = Bio, model = Model, type = "cloglog")
+# 
+# raster::writeRaster(PresentDist, paste0("Projection_Present/", str_replace_all(unique(SppOccur$Species), " ","_"), ".tif"), overwrite=TRUE)
+# 
+# m <- c(-0.1, Log$Threshold, 0,  Log$Threshold, 1.1, 1)
+# m <- matrix(m, ncol=3, byrow=TRUE)
+# PresentDist <- reclassify(PresentDist, m)
+# 
+# raster::writeRaster(PresentDist, paste0("Projection_PresentBIN/", str_replace_all(unique(SppOccur$Species), " ","_"), ".tif"), overwrite=TRUE)
+# 
+# FutureDenmarNames <- list.files("FutureScenarios/")
+# FutureDenmarFiles <- list.files("FutureScenarios/", full.names = T)
+# 
+# for(j in 1:length(FutureDenmarFiles)){
+#   Preds <- stack(FutureDenmarFiles[j])
+# names(Preds) <- paste0("Bio", 1:19)
+# 
+# FutureDist <- raster::predict(object = Preds, model = Model, type = "cloglog")
+# 
+# raster::writeRaster(FutureDist, paste0("Projection_Future/", str_replace_all(unique(SppOccur$Species), " ","_"), FutureDenmarNames[j]), overwrite=TRUE)
+# 
+# m <- c(-0.1, Log$Threshold, 0,  Log$Threshold, 1.1, 1)
+# m <- matrix(m, ncol=3, byrow=TRUE)
+# FutureDist <- reclassify(FutureDist, m)
+# 
+# raster::writeRaster(FutureDist, paste0("Projection_FutureBIN/", str_replace_all(unique(SppOccur$Species), " ","_"), FutureDenmarNames[j]), overwrite=TRUE)
+# }
+# 
+# 
+# saveRDS(Model, paste0("Models/", str_replace_all(unique(SppOccur$Species), " ","_"), ".rds"))
+# saveRDS(Log, paste0("Logs/", str_replace_all(unique(SppOccur$Species), " ","_"), ".rds"))
+# Log$Finish_Time <- Sys.time()
+# 
+# 
+# unlink(paste("TemporalRaster", i, sep = "_"), recursive = T, force = T)
+# unlink(paste("TemporalTerra", i, sep = "_"), recursive = T, force = T)
+#     sink("logModel.txt", append = T)
+#  cat(paste(i, "of", length(Presences_by_sp), "ready!", Sys.time()))
+#  cat("\n")
+#  sink()
+# 
+#   gc()
+#   #message(paste(i, "of", length(Presences_by_sp), "ready!", Sys.time()))
+# }
+# ## Extract values
+# stopCluster(cl)
+
+```
+
+## Create future scenarios
+
+```{r}
+# Futures <- read_csv("Selected.csv")
+# 
+# 
+# e <- ext(c(-27.4265002013693, 55.9403946838502, 27.7208113248701, 77.9038))
+# 
+# Future_Layers <- Futures$Path %>% 
+#   purrr::map(terra::rast)
+# 
+# for(i in 1:length(Future_Layers)){
+#   terra::NAflag(Future_Layers[[i]]) <- -32768
+# }
+# 
+# 
+# names(Future_Layers) <- Futures$Name
+# 
+# Future_Layers <- Future_Layers %>% 
+#   purrr::map(~terra::crop(.x, e)) %>% 
+#   purrr::map(~terra::project(.x, y = "+proj=aea +lon_0=17.7539063 +lat_1=37.0553505 +lat_2=61.0650168 +lat_0=49.0601837 +datum=WGS84 +units=m +no_defs"))
+# 
+# 
+# dir.create("FutureScenarios")
+# 
+# for(i in 1:length(Future_Layers)){
+#   writeRaster(Future_Layers[[i]], paste0("FutureScenarios/",names(Future_Layers)[i], ".tiff"), overwrite=TRUE)
+# }
+
+
+```
+
+
+## Project to present and future
+
+```{r}
+# library(raster)
+# library(maxnet)
+# library(tidyverse)
+# library(Matrix)
+# 
+# DF <- data.frame(Model = list.files(path = "Models/", full.names = T),
+#                  Log = list.files(path = "Logs/", full.names = T)) %>% 
+#   mutate(Spp_Model = str_remove_all(str_remove_all(Model, "Models/"), ".rds"),
+#          Spp_Logs = str_remove_all(str_remove_all(Log, "Logs/"), ".rds")) %>% 
+#   dplyr::filter(Spp_Model == Spp_Logs)
+# 
+# Futures <- read_csv("Selected.csv")
+# 
+# 
+# Nclust <- parallel::detectCores()/4
+# cl <- makeSOCKcluster(Nclust)
+# registerDoSNOW(cl)
+# 
+# ntasks <- nrow(DF)
+# pb <- tkProgressBar(max=ntasks)
+# progress <- function(n) setTkProgressBar(pb, n)
+# opts <- list(progress=progress)
+# 
+# 
+# foreach(i = 1:nrow(DF), .packages = c("terra","maxnet", "tidyverse"), .options.snow=opts) %dopar% {
+# }
+# 
+# Future_Layers <- list.files("FutureScenarios/", full.names = T) %>% 
+#   purrr::map(terra::rast)
+# 
+# names(Future_Layers) <- Futures$Name
+# 
+# for(i in 1:length(Future_Layers)){
+#   names(Future_Layers[[i]]) <- paste0("Bio", 1:19)
+# }
+# 
+# Present <- raster::stack("CurrentEA.tif")
+# 
+# names(Present) <- paste0("Bio", 1:19)
+# 
+# 
+# i = 1
+# 
+# TempModel <- readRDS(DF$Model[i])
+# 
+# TempLog <- readRDS(DF$Log[i])
+# 
+# PresentDist <-  raster::predict(object = Present, model = TempModel, type = "cloglog")
+# 
+# m <- c(-0.1, TempLog$, 1,  0.25, 0.5, 2,  0.5, 1, 3)
+# rclmat <- matrix(m, ncol=3, byrow=TRUE)
+# rc <- reclassify(r, rclmat)
+# 
+# PresentDistBIN <- 
+# 
+
+```
+
+
+
